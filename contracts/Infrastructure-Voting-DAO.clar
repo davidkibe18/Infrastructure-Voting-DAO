@@ -14,6 +14,8 @@
 (define-constant ERR_PROPOSAL_NOT_EXPIRED (err u111))
 (define-constant ERR_MILESTONE_COMPLETED (err u112))
 (define-constant ERR_INSUFFICIENT_VOTES (err u113))
+(define-constant ERR_CANNOT_DELEGATE_TO_SELF (err u114))
+(define-constant ERR_DELEGATE_NOT_MEMBER (err u115))
 
 (define-data-var next-proposal-id uint u1)
 (define-data-var next-milestone-id uint u1)
@@ -24,6 +26,7 @@
 
 (define-map members principal bool)
 (define-map member-contributions principal uint)
+(define-map delegations principal principal)
 (define-map proposals
   uint
   {
@@ -104,12 +107,32 @@
   )
 )
 
+(define-public (delegate-vote (delegate-to principal))
+  (let ((delegator tx-sender))
+    (asserts! (is-member delegator) ERR_NOT_MEMBER)
+    (asserts! (is-member delegate-to) ERR_DELEGATE_NOT_MEMBER)
+    (asserts! (not (is-eq delegator delegate-to)) ERR_CANNOT_DELEGATE_TO_SELF)
+    (map-set delegations delegator delegate-to)
+    (ok true)
+  )
+)
+
+(define-public (revoke-delegation)
+  (let ((delegator tx-sender))
+    (asserts! (is-member delegator) ERR_NOT_MEMBER)
+    (map-delete delegations delegator)
+    (ok true)
+  )
+)
+
 (define-public (vote-on-proposal (proposal-id uint) (support bool))
   (let (
     (voter tx-sender)
     (proposal (unwrap! (map-get? proposals proposal-id) ERR_PROPOSAL_NOT_FOUND))
     (current-height stacks-block-height)
     (vote-key { proposal-id: proposal-id, voter: voter })
+    (delegated-count (count-delegated-votes voter))
+    (total-vote-weight (+ u1 delegated-count))
   )
     (asserts! (is-member voter) ERR_NOT_MEMBER)
     (asserts! (is-none (map-get? votes vote-key)) ERR_ALREADY_VOTED)
@@ -119,9 +142,9 @@
     (map-set votes vote-key support)
     (map-set proposals proposal-id
       (merge proposal {
-        yes-votes: (if support (+ (get yes-votes proposal) u1) (get yes-votes proposal)),
-        no-votes: (if support (get no-votes proposal) (+ (get no-votes proposal) u1)),
-        total-voters: (+ (get total-voters proposal) u1)
+        yes-votes: (if support (+ (get yes-votes proposal) total-vote-weight) (get yes-votes proposal)),
+        no-votes: (if support (get no-votes proposal) (+ (get no-votes proposal) total-vote-weight)),
+        total-voters: (+ (get total-voters proposal) total-vote-weight)
       })
     )
     (ok true)
@@ -268,5 +291,26 @@
       prop (get status prop)
       "not-found"
     )
+  )
+)
+
+(define-private (count-delegated-votes (delegate principal))
+  (fold check-delegation (list 
+    (var-get total-members)
+  ) u0)
+)
+
+(define-private (check-delegation (member-count uint) (acc uint))
+  acc
+)
+
+(define-read-only (get-delegation (delegator principal))
+  (map-get? delegations delegator)
+)
+
+(define-read-only (is-delegating-to (delegator principal) (delegate principal))
+  (match (map-get? delegations delegator)
+    current-delegate (is-eq current-delegate delegate)
+    false
   )
 )
