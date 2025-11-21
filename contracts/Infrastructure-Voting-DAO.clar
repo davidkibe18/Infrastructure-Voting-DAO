@@ -16,6 +16,13 @@
 (define-constant ERR_INSUFFICIENT_VOTES (err u113))
 (define-constant ERR_CANNOT_DELEGATE_TO_SELF (err u114))
 (define-constant ERR_DELEGATE_NOT_MEMBER (err u115))
+(define-constant ERR_CONTRACT_PAUSED (err u116))
+(define-constant ERR_NOT_PAUSED (err u117))
+(define-constant ERR_PAUSE_COOLDOWN_ACTIVE (err u118))
+(define-constant ERR_INSUFFICIENT_PAUSE_VOTES (err u119))
+(define-constant ERR_ALREADY_VOTED_PAUSE (err u120))
+(define-constant PAUSE_COOLDOWN u144)
+(define-constant UNPAUSE_REQUIRED_VOTES u3)
 
 (define-data-var next-proposal-id uint u1)
 (define-data-var next-milestone-id uint u1)
@@ -23,6 +30,9 @@
 (define-data-var dao-treasury uint u0)
 (define-data-var voting-period uint u1440)
 (define-data-var quorum-threshold uint u51)
+(define-data-var contract-paused bool false)
+(define-data-var pause-initiated-at uint u0)
+(define-data-var last-pause-at uint u0)
 
 (define-map members principal bool)
 (define-map member-contributions principal uint)
@@ -46,6 +56,7 @@
 )
 
 (define-map votes { proposal-id: uint, voter: principal } bool)
+(define-map unpause-votes principal bool)
 (define-map milestones
   uint
   {
@@ -70,6 +81,7 @@
 
 (define-public (contribute-funds (amount uint))
   (let ((sender tx-sender))
+    (asserts! (not (var-get contract-paused)) ERR_CONTRACT_PAUSED)
     (asserts! (is-member sender) ERR_NOT_MEMBER)
     (asserts! (> amount u0) ERR_INVALID_AMOUNT)
     (try! (stx-transfer? amount sender (as-contract tx-sender)))
@@ -85,6 +97,7 @@
     (sender tx-sender)
     (current-height stacks-block-height)
   )
+    (asserts! (not (var-get contract-paused)) ERR_CONTRACT_PAUSED)
     (asserts! (is-member sender) ERR_NOT_MEMBER)
     (asserts! (> budget u0) ERR_INVALID_AMOUNT)
     (asserts! (<= budget (var-get dao-treasury)) ERR_INSUFFICIENT_FUNDS)
@@ -224,6 +237,7 @@
     (approval-rate (if (> total-votes u0) (* (/ approved-votes total-votes) u100) u0))
     (funds-approved (>= approval-rate (var-get quorum-threshold)))
   )
+    (asserts! (not (var-get contract-paused)) ERR_CONTRACT_PAUSED)
     (asserts! funds-approved ERR_INSUFFICIENT_VOTES)
     (asserts! (not (get completed milestone)) ERR_MILESTONE_COMPLETED)
     (asserts! (<= (get amount milestone) (var-get dao-treasury)) ERR_INSUFFICIENT_FUNDS)
@@ -243,6 +257,7 @@
     (sender tx-sender)
     (contribution (get-member-contribution sender))
   )
+    (asserts! (not (var-get contract-paused)) ERR_CONTRACT_PAUSED)
     (asserts! (is-member sender) ERR_NOT_MEMBER)
     (asserts! (<= amount contribution) ERR_INSUFFICIENT_FUNDS)
     (asserts! (<= amount (var-get dao-treasury)) ERR_INSUFFICIENT_FUNDS)
@@ -312,5 +327,80 @@
   (match (map-get? delegations delegator)
     current-delegate (is-eq current-delegate delegate)
     false
+  )
+)
+
+(define-public (emergency-pause)
+  (let (
+    (sender tx-sender)
+    (current-height stacks-block-height)
+    (last-pause (var-get last-pause-at))
+  )
+    (asserts! (is-member sender) ERR_NOT_MEMBER)
+    (asserts! (not (var-get contract-paused)) ERR_CONTRACT_PAUSED)
+    (asserts! (or (is-eq last-pause u0) (> (- current-height last-pause) PAUSE_COOLDOWN)) ERR_PAUSE_COOLDOWN_ACTIVE)
+    (var-set contract-paused true)
+    (var-set pause-initiated-at current-height)
+    (var-set last-pause-at current-height)
+    (ok true)
+  )
+)
+
+(define-public (vote-unpause)
+  (let (
+    (voter tx-sender)
+  )
+    (asserts! (var-get contract-paused) ERR_NOT_PAUSED)
+    (asserts! (is-member voter) ERR_NOT_MEMBER)
+    (asserts! (is-none (map-get? unpause-votes voter)) ERR_ALREADY_VOTED_PAUSE)
+    (map-set unpause-votes voter true)
+    (ok true)
+  )
+)
+
+(define-public (execute-unpause)
+  (let (
+    (vote-count (count-unpause-votes))
+  )
+    (asserts! (var-get contract-paused) ERR_NOT_PAUSED)
+    (asserts! (>= vote-count UNPAUSE_REQUIRED_VOTES) ERR_INSUFFICIENT_PAUSE_VOTES)
+    (var-set contract-paused false)
+    (var-set pause-initiated-at u0)
+    (clear-unpause-votes)
+    (ok true)
+  )
+)
+
+(define-read-only (get-pause-status)
+  {
+    is-paused: (var-get contract-paused),
+    pause-initiated-at: (var-get pause-initiated-at),
+    last-pause-at: (var-get last-pause-at)
+  }
+)
+
+(define-read-only (has-voted-unpause (voter principal))
+  (default-to false (map-get? unpause-votes voter))
+)
+
+(define-private (count-unpause-votes)
+  (fold count-unpause-vote-iter 
+    (list tx-sender CONTRACT_OWNER)
+    u0
+  )
+)
+
+(define-private (count-unpause-vote-iter (voter principal) (acc uint))
+  (if (default-to false (map-get? unpause-votes voter))
+    (+ acc u1)
+    acc
+  )
+)
+
+(define-private (clear-unpause-votes)
+  (begin
+    (map-delete unpause-votes tx-sender)
+    (map-delete unpause-votes CONTRACT_OWNER)
+    true
   )
 )
